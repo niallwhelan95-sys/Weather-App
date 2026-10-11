@@ -164,18 +164,31 @@ const hhmm = (ms) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minu
 const hh = (ms) => new Date(ms).toLocaleTimeString([], { hour: 'numeric' }).replace(' ', '').toLowerCase();
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]));
 
+const geo = (opts) => new Promise((ok, no) => {
+  if (!navigator.geolocation) return no({ code: 0 });
+  navigator.geolocation.getCurrentPosition(ok, no, opts);
+});
+let locError = null;
 async function getCoords() {
   if (S.place) return S.place;
+  locError = null;
   try {
-    const p = await new Promise((ok, no) => navigator.geolocation.getCurrentPosition(ok, no, { timeout: 10000, maximumAge: 600000 }));
+    let p;
+    try { p = await geo({ timeout: 15000, maximumAge: 600000 }); }
+    catch (e) { if (e.code === 1) throw e; p = await geo({ timeout: 20000, maximumAge: Infinity, enableHighAccuracy: false }); }
     S.last = { lat: +p.coords.latitude.toFixed(3), lon: +p.coords.longitude.toFixed(3) };
     persist();
     return S.last;
-  } catch {
+  } catch (e) {
+    locError = e.code === 1
+      ? 'Your phone is blocking location for this browser. iPhone Settings → Privacy & Security → Location Services → turn it on for this browser ("While Using"), then tap below.'
+      : !window.isSecureContext ? 'Location needs the https:// link.'
+      : 'Couldn\'t get a GPS fix. Check Location Services is on, then tap below.';
     if (S.last) return S.last;
-    throw new Error('Location is off. Tap ⚙️ to search for a place.');
+    throw new Error(locError);
   }
 }
+function retryGps() { S.place = null; persist(); load(); }
 
 async function nameFor(c) {
   if (c.name) return c.name;
@@ -197,7 +210,8 @@ async function load() {
     render();
   } catch (e) {
     document.getElementById('app').innerHTML = `<header><div class="place">Weather Blend</div><button class="icon-btn" onclick="openSheet()">⚙️</button></header>
-      <div class="loading">⚠️<br>${esc(e.message)}<br><br><button class="btn ghost" style="width:auto;padding:10px 18px" onclick="load()">Try again</button></div>`;
+      <div class="loading">⚠️<br>${esc(e.message)}<br><br><button class="btn" style="width:auto;padding:10px 18px" onclick="retryGps()">📍 Use my location</button>
+      <br><br><button class="btn ghost" style="width:auto;padding:10px 18px" onclick="openSheet()">Search a place instead</button></div>`;
   }
 }
 
@@ -235,7 +249,7 @@ function render() {
 
   document.getElementById('app').innerHTML = `
   <header>
-    <button class="place" onclick="openSheet()">${esc(placeName)} ▾<small>Updated ${hhmm(d.generated)}</small></button>
+    <button class="place" onclick="openSheet()">${esc(placeName)} ▾<small>Updated ${hhmm(d.generated)}${locError && !S.place ? ' · last known location' : ''}</small></button>
     <button class="icon-btn" onclick="load()" aria-label="Refresh">↻</button>
     <button class="icon-btn" onclick="openSheet()" aria-label="Settings">⚙️</button>
   </header>
