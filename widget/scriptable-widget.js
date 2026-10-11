@@ -1,6 +1,6 @@
 // Weather Blend — iOS home-screen widget for the free "Scriptable" app.
-// Small  = temp, feels-like + how cold, rain window, 4 slots (every 2h)
-// Medium = the same + outfit tip + 8 hours, hour by hour (best size)
+// Small  = place, temp, how cold, WHEN IT RAINS, what to wear + umbrella, 6 time slots
+// Medium = the same + H/L + outfit tip + 8 hours, hour by hour
 // Large  = 16 hours + outfit advice + the next 4 days
 //
 // 1. Install Scriptable from the App Store.
@@ -20,6 +20,7 @@ const icon = (c) => {
 };
 const T = (c) => c == null ? '–' : Math.round(FAHRENHEIT ? c * 9 / 5 + 32 : c) + '°';
 const H12 = (ms) => { const h = new Date(ms).getHours(); return h === 0 ? '12a' : h < 12 ? h + 'a' : h === 12 ? '12p' : (h - 12) + 'p'; };
+const AMPM = (ms) => { const h = new Date(ms).getHours(); return (h % 12 || 12) + (h < 12 ? 'am' : 'pm'); };
 const HH = (ms) => String(new Date(ms).getHours()).padStart(2, '0') + ':00';
 
 // how cold does it feel? (word + colour)
@@ -48,14 +49,38 @@ function rainRanges(hours) {
 
 function rainSummary(d, short) {
   const r = rainRanges(d.hours);
-  if (!r.length) return { text: short ? '🌤 Dry next 24h' : '🌤 Dry for the next 24h', wet: false };
   const first = r[0], now = Date.now();
+  if (!first) return { text: short ? '🌤 No rain next 24h' : '🌤 Dry for the next 24h', wet: false };
+  if (short) {
+    if (first.from <= now + 1800000) return { text: `🌧 Raining till ${AMPM(first.to)}`, wet: true };
+    const away = Math.round((first.from - now) / 3600000);
+    return { text: `☔ Rain ${AMPM(first.from)}–${AMPM(first.to)} · ${away < 1 ? 'soon' : 'in ' + away + 'h'}`, wet: true };
+  }
   const total = r.reduce((s, x) => s + x.mm, 0);
-  const mm = !short && total >= 0.1 ? ` · ${total.toFixed(1)}mm` : '';
+  const mm = total >= 0.1 ? ` · ${total.toFixed(1)}mm` : '';
   const text = first.from <= now + 1800000
     ? `🌧 Rain now → ${HH(first.to)}${mm}`
-    : `☔ ${HH(first.from)}–${HH(first.to)}${r.length > 1 && !short ? ` +${r.length - 1} more` : ''}${mm}`;
+    : `☔ ${HH(first.from)}–${HH(first.to)}${r.length > 1 ? ` +${r.length - 1} more` : ''}${mm}`;
   return { text, wet: true };
+}
+
+// one line of outfit text for the small widget: "🧥 Light jacket + ☂️ umbrella"
+function outfitLine(d) {
+  const items = d.outfit.items || [];
+  const coat = items.find((i) => i.icon === '🧥');
+  let base, em = '🧥';
+  if (coat) {
+    const l = coat.label.toLowerCase();
+    base = l.includes('heavy') || l.includes('winter') ? 'Warm coat'
+      : l.includes('rain') || l.includes('packable') ? 'Rain jacket'
+      : l.includes('light') ? 'Light jacket' : 'Jacket';
+  } else {
+    em = '👕';
+    base = (items.find((i) => i.icon === '👕' || i.icon === '🧶') || { label: 'Light layers' }).label;
+  }
+  const umb = items.find((i) => i.icon === '☂️');
+  const tail = umb ? (umb.label.startsWith('Compact') ? ' + ☂️ maybe' : ' + ☂️ umbrella') : ' · no umbrella';
+  return `${em} ${base}${tail}`;
 }
 
 async function getLocation() {
@@ -70,6 +95,13 @@ async function getLocation() {
     if (fm.fileExists(cache)) return JSON.parse(fm.readString(cache));
     throw new Error('Allow location for Scriptable');
   }
+}
+
+async function placeName(loc) {
+  try {
+    const r = await Location.reverseGeocode(loc.latitude, loc.longitude);
+    return (r && r[0] && (r[0].locality || r[0].subLocality || r[0].administrativeArea)) || '';
+  } catch { return ''; }
 }
 
 // small helper: add a text line to a stack
@@ -91,7 +123,8 @@ function hourRow(parent, list, sz, white, dim, rainBlue) {
     line(col, H12(h.t), Font.systemFont(sz.time), dim);
     line(col, icon(h.code), Font.systemFont(sz.icon), white);
     line(col, T(h.temp), Font.semiboldSystemFont(sz.temp), white);
-    line(col, (h.pop ?? 0) >= 20 ? Math.round(h.pop) + '%' : ' ', Font.mediumSystemFont(sz.rain), rainBlue);
+    const wet = (h.pop ?? 0) >= 50;
+    line(col, (h.pop ?? 0) >= 20 ? Math.round(h.pop) + '%' : ' ', wet ? Font.boldSystemFont(sz.rain) : Font.mediumSystemFont(sz.rain), rainBlue);
   });
 }
 
@@ -104,9 +137,9 @@ async function build() {
   w.url = APP_URL;
   w.refreshAfterDate = new Date(Date.now() + 15 * 60 * 1000);
 
-  let d;
+  let d, loc;
   try {
-    const loc = await getLocation();
+    loc = await getLocation();
     const req = new Request(`${APP_URL}/api/weather?lat=${loc.latitude.toFixed(3)}&lon=${loc.longitude.toFixed(3)}&from=${OUT_FROM}&to=${OUT_TO}&bias=${BIAS}`);
     req.timeoutInterval = 20;
     d = await req.loadJSON();
@@ -124,54 +157,75 @@ async function build() {
   const [coldWord, coldColor] = coldness(d.now.feels);
   const hrs = d.hours;
 
-  w.setPadding(small ? 10 : 12, small ? 12 : 16, small ? 8 : 10, small ? 12 : 16);
+  if (small) {
+    // ── SMALL: filled top, rain-first
+    w.setPadding(9, 12, 6, 12);
+    const place = await placeName(loc);
 
-  // ── header: icon + temp (left), H/L + outfit (right, medium/large)
-  const top = w.addStack(); top.centerAlignContent();
-  line(top, `${icon(d.now.code)} ${T(d.now.temp)}`, Font.boldSystemFont(small ? 24 : 30), white);
-  top.addSpacer();
-  if (!small) {
-    const right = top.addStack(); right.layoutVertically();
-    const hl = line(right, `H ${T(today.max)}   L ${T(today.min)}`, Font.semiboldSystemFont(13), white); hl.rightAlignText();
-    const ot = line(right, `👔 ${d.outfit.short}`, Font.systemFont(12), dim); ot.rightAlignText();
+    const hdr = w.addStack(); hdr.centerAlignContent();
+    line(hdr, `📍 ${place || 'Now'}`, Font.mediumSystemFont(10), dim);
+    hdr.addSpacer();
+    line(hdr, `H ${T(today.max)}  L ${T(today.min)}`, Font.mediumSystemFont(10), dim);
+    w.addSpacer(1);
+
+    const top = w.addStack(); top.centerAlignContent();
+    line(top, `${icon(d.now.code)} ${T(d.now.temp)}`, Font.boldSystemFont(27), white);
+    top.addSpacer();
+    const fr = top.addStack(); fr.layoutVertically();
+    line(fr, `Feels ${T(d.now.feels)}`, Font.systemFont(11), dim).rightAlignText();
+    line(fr, coldWord, Font.boldSystemFont(12), new Color(coldColor)).rightAlignText();
+    w.addSpacer(2);
+
+    const rs = rainSummary(d, true);
+    line(w, rs.text, Font.semiboldSystemFont(12), rs.wet ? rainBlue : dim);
+    w.addSpacer(1);
+    line(w, outfitLine(d), Font.mediumSystemFont(11), white);
+    w.addSpacer(5);
+
+    hourRow(w, [0, 2, 4, 6, 8, 10].map((i) => hrs[i]).filter(Boolean), { time: 9, icon: 13, temp: 11, rain: 9 }, white, dim, rainBlue);
+    w.addSpacer();
+    return w;
   }
 
-  // ── feels like + how cold
+  // ── MEDIUM / LARGE
+  w.setPadding(12, 16, 10, 16);
+
+  const top = w.addStack(); top.centerAlignContent();
+  line(top, `${icon(d.now.code)} ${T(d.now.temp)}`, Font.boldSystemFont(30), white);
+  top.addSpacer();
+  const right = top.addStack(); right.layoutVertically();
+  line(right, `H ${T(today.max)}   L ${T(today.min)}`, Font.semiboldSystemFont(13), white).rightAlignText();
+  line(right, `👔 ${d.outfit.short}`, Font.systemFont(12), dim).rightAlignText();
+
   const f = w.addStack(); f.centerAlignContent();
-  line(f, `Feels ${T(d.now.feels)} · `, Font.systemFont(small ? 11 : 12), dim);
-  line(f, coldWord, Font.boldSystemFont(small ? 11 : 12), new Color(coldColor));
+  line(f, `Feels ${T(d.now.feels)} · `, Font.systemFont(12), dim);
+  line(f, coldWord, Font.boldSystemFont(12), new Color(coldColor));
   f.addSpacer();
 
-  // ── rain for the day
-  const rs = rainSummary(d, small);
-  w.addSpacer(small ? 2 : 3);
-  line(w, rs.text, Font.semiboldSystemFont(small ? 11 : 12), rs.wet ? rainBlue : dim);
-  w.addSpacer(small ? 4 : 6);
+  const rs = rainSummary(d, false);
+  w.addSpacer(3);
+  line(w, rs.text, Font.semiboldSystemFont(12), rs.wet ? rainBlue : dim);
+  w.addSpacer(6);
 
-  // ── hour by hour
-  if (small) {
-    hourRow(w, [0, 2, 4, 6].map((i) => hrs[i]).filter(Boolean), { time: 9, icon: 14, temp: 11, rain: 9 }, white, dim, rainBlue);
-  } else {
-    hourRow(w, hrs.slice(0, 8), { time: 10, icon: 15, temp: 12, rain: 10 }, white, dim, rainBlue);
-    if (large) {
-      w.addSpacer(8);
-      hourRow(w, hrs.slice(8, 16), { time: 10, icon: 15, temp: 12, rain: 10 }, white, dim, rainBlue);
-      w.addSpacer(8);
-      line(w, d.outfit.headline, Font.semiboldSystemFont(12), white);
-      w.addSpacer(8);
-      for (const x of d.daily.slice(1, 5)) {
-        const row = w.addStack(); row.centerAlignContent();
-        line(row, new Date(x.t).toLocaleDateString('en-IE', { weekday: 'short' }), Font.mediumSystemFont(13), white);
-        row.addSpacer(10);
-        line(row, icon(x.code), Font.systemFont(14), white);
-        row.addSpacer(10);
-        line(row, x.pop >= 20 ? `${Math.round(x.pop)}%` : '', Font.mediumSystemFont(11), rainBlue);
-        row.addSpacer();
-        line(row, T(x.min), Font.systemFont(13), dim);
-        row.addSpacer(10);
-        line(row, T(x.max), Font.semiboldSystemFont(13), white);
-        w.addSpacer(3);
-      }
+  hourRow(w, hrs.slice(0, 8), { time: 10, icon: 15, temp: 12, rain: 10 }, white, dim, rainBlue);
+  if (large) {
+    w.addSpacer(8);
+    hourRow(w, hrs.slice(8, 16), { time: 10, icon: 15, temp: 12, rain: 10 }, white, dim, rainBlue);
+    w.addSpacer(8);
+    line(w, d.outfit.headline, Font.semiboldSystemFont(12), white);
+    w.addSpacer(8);
+    for (const x of d.daily.slice(1, 5)) {
+      const row = w.addStack(); row.centerAlignContent();
+      line(row, new Date(x.t).toLocaleDateString('en-IE', { weekday: 'short' }), Font.mediumSystemFont(13), white);
+      row.addSpacer(10);
+      line(row, icon(x.code), Font.systemFont(14), white);
+      row.addSpacer(10);
+      line(row, x.pop >= 20 ? `${Math.round(x.pop)}%` : '', Font.mediumSystemFont(11), rainBlue);
+      row.addSpacer();
+      line(row, T(x.min), Font.systemFont(13), dim);
+      row.addSpacer(10);
+      line(row, T(x.max), Font.semiboldSystemFont(13), white);
+      w.addSpacer(3);
     }
   }
   return w;
