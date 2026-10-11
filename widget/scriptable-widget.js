@@ -1,7 +1,7 @@
 // Weather Blend — iOS home-screen widget for the free "Scriptable" app.
-// Small  = now + feels-like + rain summary + 4 slots (every 2h)
-// Medium = the same + 8 hours, hour by hour (best size)
-// Large  = 16 hours + the next 4 days
+// Small  = temp, feels-like + how cold, rain window, 4 slots (every 2h)
+// Medium = the same + outfit tip + 8 hours, hour by hour (best size)
+// Large  = 16 hours + outfit advice + the next 4 days
 //
 // 1. Install Scriptable from the App Store.
 // 2. New script → paste this whole file.
@@ -35,7 +35,7 @@ function coldness(feels) {
 
 const isWet = (h) => (h.pop ?? 0) >= 50 || (h.precip ?? 0) >= 0.3;
 
-// group consecutive wet hours in the next 24h → "21:00–02:00"
+// group consecutive wet hours in the next 24h
 function rainRanges(hours) {
   const out = []; let cur = null;
   hours.slice(0, 24).forEach((h) => {
@@ -46,15 +46,15 @@ function rainRanges(hours) {
   return out;
 }
 
-function rainSummary(d) {
+function rainSummary(d, short) {
   const r = rainRanges(d.hours);
-  if (!r.length) return { text: '🌤 Dry for the next 24h', wet: false };
+  if (!r.length) return { text: short ? '🌤 Dry next 24h' : '🌤 Dry for the next 24h', wet: false };
   const first = r[0], now = Date.now();
   const total = r.reduce((s, x) => s + x.mm, 0);
-  const mm = total >= 0.1 ? ` · ${total.toFixed(1)}mm` : '';
+  const mm = !short && total >= 0.1 ? ` · ${total.toFixed(1)}mm` : '';
   const text = first.from <= now + 1800000
-    ? `🌧 Raining now, until ${HH(first.to)}${mm}`
-    : `☔ Rain ${HH(first.from)}–${HH(first.to)}${r.length > 1 ? ` +${r.length - 1} more` : ''}${mm}`;
+    ? `🌧 Rain now → ${HH(first.to)}${mm}`
+    : `☔ ${HH(first.from)}–${HH(first.to)}${r.length > 1 && !short ? ` +${r.length - 1} more` : ''}${mm}`;
   return { text, wet: true };
 }
 
@@ -72,15 +72,27 @@ async function getLocation() {
   }
 }
 
-// one hourly column: time / icon / temp / rain%
-function hourCol(row, h, white, dim, rainBlue, w) {
-  const col = row.addStack(); col.layoutVertically(); col.centerAlignContent();
-  col.size = new Size(w, 0);
-  const add = (txt, font, color) => { const s = col.addStack(); s.centerAlignContent(); s.addSpacer(); const t = s.addText(txt); t.font = font; t.textColor = color; t.lineLimit = 1; s.addSpacer(); return t; };
-  add(H12(h.t), Font.systemFont(10), dim);
-  add(icon(h.code), Font.systemFont(15), white);
-  add(T(h.temp), Font.semiboldSystemFont(12), white);
-  add((h.pop ?? 0) >= 20 ? Math.round(h.pop) + '%' : ' ', Font.mediumSystemFont(10), rainBlue);
+// small helper: add a text line to a stack
+function line(stack, txt, font, color) {
+  const t = stack.addText(String(txt));
+  t.font = font; t.textColor = color; t.lineLimit = 1; t.minimumScaleFactor = 0.7;
+  return t;
+}
+
+// a row of hourly columns: time / icon / temp / rain%
+function hourRow(parent, list, sz, white, dim, rainBlue) {
+  const row = parent.addStack();
+  row.layoutHorizontally();
+  list.forEach((h, i) => {
+    if (i) row.addSpacer();
+    const col = row.addStack();
+    col.layoutVertically();
+    col.centerAlignContent();
+    line(col, H12(h.t), Font.systemFont(sz.time), dim);
+    line(col, icon(h.code), Font.systemFont(sz.icon), white);
+    line(col, T(h.temp), Font.semiboldSystemFont(sz.temp), white);
+    line(col, (h.pop ?? 0) >= 20 ? Math.round(h.pop) + '%' : ' ', Font.mediumSystemFont(sz.rain), rainBlue);
+  });
 }
 
 async function build() {
@@ -91,7 +103,6 @@ async function build() {
   w.backgroundGradient = g;
   w.url = APP_URL;
   w.refreshAfterDate = new Date(Date.now() + 15 * 60 * 1000);
-  w.setPadding(12, 14, 10, 14);
 
   let d;
   try {
@@ -106,80 +117,61 @@ async function build() {
     return w;
   }
 
-  const white = Color.white(), dim = new Color('#ffffff', 0.7), rainBlue = new Color('#7cc4ff');
+  const white = Color.white(), dim = new Color('#ffffff', 0.72), rainBlue = new Color('#8fd0ff');
   const family = config.widgetFamily || 'medium';
   const small = family === 'small', large = family === 'large';
   const today = d.daily[0] || {};
   const [coldWord, coldColor] = coldness(d.now.feels);
+  const hrs = d.hours;
 
-  // — header: icon + temp, H/L on the right
+  w.setPadding(small ? 10 : 12, small ? 12 : 16, small ? 8 : 10, small ? 12 : 16);
+
+  // ── header: icon + temp (left), H/L + outfit (right, medium/large)
   const top = w.addStack(); top.centerAlignContent();
-  const big = top.addText(`${icon(d.now.code)} ${T(d.now.temp)}`);
-  big.font = Font.boldSystemFont(small ? 28 : 32); big.textColor = white;
+  line(top, `${icon(d.now.code)} ${T(d.now.temp)}`, Font.boldSystemFont(small ? 24 : 30), white);
   top.addSpacer();
   if (!small) {
     const right = top.addStack(); right.layoutVertically();
-    const hl = right.addText(`H ${T(today.max)}  L ${T(today.min)}`);
-    hl.font = Font.semiboldSystemFont(13); hl.textColor = white; hl.rightAlignText();
-    const wd = right.addText(`💨 ${Math.round(d.now.wind)} km/h`);
-    wd.font = Font.systemFont(11); wd.textColor = dim; wd.rightAlignText();
+    const hl = line(right, `H ${T(today.max)}   L ${T(today.min)}`, Font.semiboldSystemFont(13), white); hl.rightAlignText();
+    const ot = line(right, `👔 ${d.outfit.short}`, Font.systemFont(12), dim); ot.rightAlignText();
   }
 
-  // — how cold: "Feels 11° · Chilly"
+  // ── feels like + how cold
   const f = w.addStack(); f.centerAlignContent();
-  const ft = f.addText(`Feels ${T(d.now.feels)} · `); ft.font = Font.systemFont(12); ft.textColor = dim;
-  const fc = f.addText(coldWord); fc.font = Font.boldSystemFont(12); fc.textColor = new Color(coldColor);
-  if (small) { f.addSpacer(); }
+  line(f, `Feels ${T(d.now.feels)} · `, Font.systemFont(small ? 11 : 12), dim);
+  line(f, coldWord, Font.boldSystemFont(small ? 11 : 12), new Color(coldColor));
+  f.addSpacer();
+
+  // ── rain for the day
+  const rs = rainSummary(d, small);
+  w.addSpacer(small ? 2 : 3);
+  line(w, rs.text, Font.semiboldSystemFont(small ? 11 : 12), rs.wet ? rainBlue : dim);
+  w.addSpacer(small ? 4 : 6);
+
+  // ── hour by hour
   if (small) {
-    const hl = w.addText(`H ${T(today.max)} · L ${T(today.min)}`);
-    hl.font = Font.systemFont(11); hl.textColor = dim;
-  }
-  w.addSpacer(4);
-
-  // — rain for the day
-  const rs = rainSummary(d);
-  const r = w.addText(rs.text);
-  r.font = Font.semiboldSystemFont(small ? 11 : 12); r.textColor = rs.wet ? rainBlue : dim; r.minimumScaleFactor = 0.7; r.lineLimit = 1;
-
-  // — what to wear (medium/large only; small is too tight)
-  if (!small) {
-    w.addSpacer(2);
-    const wear = w.addText(`👔 ${d.outfit.headline}`);
-    wear.font = Font.systemFont(11); wear.textColor = dim; wear.minimumScaleFactor = 0.6; wear.lineLimit = 1;
-  }
-  w.addSpacer(small ? 5 : 7);
-
-  // — hour by hour
-  const hrs = d.hours;
-  if (small) {
-    const row = w.addStack();
-    const picks = [0, 2, 4, 6].map((i) => hrs[i]).filter(Boolean);
-    picks.forEach((h, i) => { hourCol(row, h, white, dim, rainBlue, 31); });
+    hourRow(w, [0, 2, 4, 6].map((i) => hrs[i]).filter(Boolean), { time: 9, icon: 14, temp: 11, rain: 9 }, white, dim, rainBlue);
   } else {
-    const perRow = 8, width = large ? 36 : 36;
-    const rows = large ? 2 : 1;
-    for (let r2 = 0; r2 < rows; r2++) {
-      const row = w.addStack();
-      hrs.slice(r2 * perRow, (r2 + 1) * perRow).forEach((h) => hourCol(row, h, white, dim, rainBlue, width));
-      if (r2 < rows - 1) w.addSpacer(4);
-    }
-  }
-
-  // — next days (large)
-  if (large) {
-    w.addSpacer(8);
-    for (const x of d.daily.slice(1, 5)) {
-      const row = w.addStack(); row.centerAlignContent();
-      const day = row.addText(new Date(x.t).toLocaleDateString('en-IE', { weekday: 'short' })); day.font = Font.mediumSystemFont(13); day.textColor = white;
-      row.addSpacer(8);
-      row.addText(icon(x.code)).font = Font.systemFont(14);
-      row.addSpacer(8);
-      const p = row.addText(x.pop >= 20 ? `${Math.round(x.pop)}%` : ''); p.font = Font.mediumSystemFont(11); p.textColor = rainBlue;
-      row.addSpacer();
-      const lo = row.addText(T(x.min)); lo.font = Font.systemFont(13); lo.textColor = dim;
-      row.addSpacer(8);
-      const hi = row.addText(T(x.max)); hi.font = Font.semiboldSystemFont(13); hi.textColor = white;
-      w.addSpacer(3);
+    hourRow(w, hrs.slice(0, 8), { time: 10, icon: 15, temp: 12, rain: 10 }, white, dim, rainBlue);
+    if (large) {
+      w.addSpacer(8);
+      hourRow(w, hrs.slice(8, 16), { time: 10, icon: 15, temp: 12, rain: 10 }, white, dim, rainBlue);
+      w.addSpacer(8);
+      line(w, d.outfit.headline, Font.semiboldSystemFont(12), white);
+      w.addSpacer(8);
+      for (const x of d.daily.slice(1, 5)) {
+        const row = w.addStack(); row.centerAlignContent();
+        line(row, new Date(x.t).toLocaleDateString('en-IE', { weekday: 'short' }), Font.mediumSystemFont(13), white);
+        row.addSpacer(10);
+        line(row, icon(x.code), Font.systemFont(14), white);
+        row.addSpacer(10);
+        line(row, x.pop >= 20 ? `${Math.round(x.pop)}%` : '', Font.mediumSystemFont(11), rainBlue);
+        row.addSpacer();
+        line(row, T(x.min), Font.systemFont(13), dim);
+        row.addSpacer(10);
+        line(row, T(x.max), Font.semiboldSystemFont(13), white);
+        w.addSpacer(3);
+      }
     }
   }
   return w;
