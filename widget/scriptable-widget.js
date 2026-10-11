@@ -3,7 +3,7 @@
 // 2. New script → paste this whole file → set APP_URL below to your Vercel URL.
 // 3. Long-press home screen → + → Scriptable → pick Small or Medium → Edit Widget → Script: this one.
 
-const APP_URL = 'https://YOUR-PROJECT.vercel.app'; // ← change me
+const APP_URL = 'https://weather-app-jet-two-47.vercel.app';
 const OUT_FROM = 8;   // hour you usually head out
 const OUT_TO = 22;    // hour you usually get home
 const BIAS = 0;       // -3 (run warm) … +3 (run cold)
